@@ -3,6 +3,7 @@ package com.chikere.verseguide.bot;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.RestTemplate;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
@@ -14,6 +15,7 @@ public class VerseGuideBot extends TelegramLongPollingBot {
 
     private final String botUsername;
     private final String botToken;
+    private final RestTemplate restTemplate = new RestTemplate();
 
     public VerseGuideBot(
             @Value("${telegram.bot.username}") String botUsername,
@@ -31,9 +33,23 @@ public class VerseGuideBot extends TelegramLongPollingBot {
         if (update.hasMessage() && update.getMessage().hasText()) {
             var chatId = update.getMessage().getChatId().toString();
             var userMessage = update.getMessage().getText();
-            var reply = "Thank you for your message: " + userMessage + " This is Chikere. Welcome to Verse Guide. The application is still in development";
+            String response;
             try {
-                execute(new SendMessage(chatId, reply));
+                response = restTemplate.getForObject(
+                        "http://localhost:8080/api/verse?query={query}",
+                        String.class,
+                        userMessage
+                );
+            } catch (Exception e) {
+                response = "Sorry, I couldn’t find a suitable verse right now. Please try again later.";
+            }
+
+            assert response != null;
+            SendMessage message = new SendMessage(chatId, response);
+            message.enableMarkdown(true);
+
+            try {
+                execute(message);
             } catch (TelegramApiException e) {
                 log.error("Exception during processing telegram api: {}", e.getMessage());
             }
