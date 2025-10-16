@@ -2,141 +2,293 @@ package com.chikere.verseguide.bot;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestTemplate;
+import org.springframework.web.reactive.function.client.WebClient;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Telegram bot that provides Bible verse searches with daily rate limiting.
+ * Allows users to search for verses by keywords and provides reflections.
+ */
 @Component
 @Slf4j
 public class VerseGuideBot extends TelegramLongPollingBot {
 
+    private static final int MAX_QUERY_LENGTH = 200;
+    private static final int API_TIMEOUT_SECONDS = 10;
+
     private final String botUsername;
     private final String botToken;
     private final int dailyLimit;
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final String verseApiUrl;
+    private final WebClient webClient;
 
-    // Store user usage data per day
+    // Thread-safe storage for user usage data
     private final Map<Long, UserUsage> userUsageMap = new ConcurrentHashMap<>();
 
     public VerseGuideBot(
             @Value("${telegram.bot.username}") String botUsername,
             @Value("${telegram.bot.token}") String botToken,
-            @Value("${telegram.bot.daily-limit:5}") int dailyLimit // default to 5 if not set
+            @Value("${telegram.bot.daily-limit:3}") int dailyLimit,
+            @Value("${verse.api.url:http://localhost:8080/api/verse}") String verseApiUrl,
+            WebClient.Builder webClientBuilder
     ) {
         this.botUsername = botUsername;
         this.botToken = botToken;
         this.dailyLimit = dailyLimit;
+        this.verseApiUrl = verseApiUrl;
+        this.webClient = webClientBuilder
+                .baseUrl(verseApiUrl)
+                .build();
 
-        log.debug(">>> Loaded from properties: username={} | token prefix={} | dailyLimit={}",
-                botUsername,
-                botToken != null && botToken.length() >= 6 ? botToken.substring(0, 6) : "null",
-                dailyLimit);
+        log.info("VerseGuideBot initialized - username: {}, dailyLimit: {}, apiUrl: {}",
+                botUsername, dailyLimit, verseApiUrl);
     }
 
     @Override
     public void onUpdateReceived(Update update) {
-        if (!update.hasMessage() || !update.getMessage().hasText()) return;
+        if (!update.hasMessage() || update.getMessage() == null || !update.getMessage().hasText()) {
+            return;
+        }
 
         Long chatId = update.getMessage().getChatId();
         String userText = update.getMessage().getText().trim();
 
-        // 🌿 1. Handle /start
-        if (userText.equalsIgnoreCase("/start")) {
-            sendMessage(chatId, getWelcomeMessage());
-            return;
+        try {
+            handleUserMessage(chatId, userText);
+        } catch (Exception e) {
+            log.error("Error processing message from user {}: {}", chatId, e.getMessage(), e);
+            sendMessage(chatId, "❌ An unexpected error occurred. Please try again later.");
         }
+    }
 
-        if (userText.equalsIgnoreCase("/reset")) {
-            userUsageMap.remove(chatId);
-            sendMessage(chatId, "✅ Your daily limit has been reset.");
-            return;
+    /**
+     * Routes user messages to appropriate handlers based on command or query
+     */
+    private void handleUserMessage(Long chatId, String userText) {
+        switch (userText.toLowerCase()) {
+            case "/start" -> handleStartCommand(chatId);
+            case "/help" -> handleHelpCommand(chatId);
+            case "/status" -> handleStatusCommand(chatId);
+            case "/reset" -> handleResetCommand(chatId);
+            default -> handleVerseQuery(chatId, userText);
         }
+    }
 
-        // 🧮 2. Check if user can still use bot
+    /**
+     * Handles the /start command
+     */
+    private void handleStartCommand(Long chatId) {
+        String welcomeMessage = String.format("""
+                🌿 *Welcome to VerseGuide!*
+                Discover Bible verses and reflections that bring clarity, peace, or inspiration.
+                
+                📖 *How to use:*
+                Type a word or phrase like *"hope"*, *"forgiveness"*, or *"peace"*.
+                VerseGuide will share a matching verse and reflection.
+                
+                📊 *Commands:*
+                /help - Show this help message
+                /status - Check your remaining requests
+                
+                ⚖️ *Rate Limit:* %d requests per day
+                
+                — VerseGuide by Chikere Ezeh 🙏
+                """, dailyLimit);
+        sendMessage(chatId, welcomeMessage);
+    }
+
+    /**
+     * Handles the /help command
+     */
+    private void handleHelpCommand(Long chatId) {
+        handleStartCommand(chatId); // Same as welcome message
+    }
+
+    /**
+     * Handles the /status command
+     */
+    private void handleStatusCommand(Long chatId) {
         int remaining = getRemainingRequests(chatId);
-        if (remaining <= 0) {
+        int used = dailyLimit - remaining;
+
+        String statusMessage = String.format("""
+                📊 *Your Daily Status*
+                
+                ✅ Used: %d request(s)
+                🔄 Remaining: %d request(s)
+                📅 Limit: %d per day
+                🕐 Resets: Midnight (your time)
+                """, used, remaining, dailyLimit);
+
+        sendMessage(chatId, statusMessage);
+    }
+
+    /**
+     * Handles the /reset command (for testing purposes)
+     */
+    private void handleResetCommand(Long chatId) {
+        userUsageMap.remove(chatId);
+        log.info("User {} manually reset their daily limit", chatId);
+        sendMessage(chatId, "✅ Your daily limit has been reset successfully.");
+    }
+
+    /**
+     * Handles verse search queries
+     */
+    private void handleVerseQuery(Long chatId, String query) {
+        // Validate input
+        if (query.isBlank()) {
+            sendMessage(chatId, "⚠️ Please enter a word or phrase to search for verses.");
+            return;
+        }
+
+        if (query.length() > MAX_QUERY_LENGTH) {
+            sendMessage(chatId, String.format(
+                    "⚠️ Your query is too long. Please keep it under %d characters.",
+                    MAX_QUERY_LENGTH));
+            return;
+        }
+
+        // Check rate limit
+        if (!canMakeRequest(chatId)) {
             sendMessage(chatId, String.format("""
-                    ⚠️ You’ve reached your daily limit of %d requests.
-                    Please come back tomorrow. 🙏
+                    ⚠️ You've reached your daily limit of %d requests.
+                    Your limit will reset at midnight. 🙏
+                    
+                    Use /status to check your remaining requests.
                     """, dailyLimit));
             return;
         }
 
-        // 📖 3. Get verse from backend API
-        String response;
-        try {
-            response = restTemplate.getForObject(
-                    "http://localhost:8080/api/verse?query={query}",
-                    String.class,
-                    userText
-            );
-        } catch (Exception e) {
-            log.error("Error calling verse API: {}", e.getMessage());
-            response = "Sorry, something went wrong while finding a verse. Please try again later.";
-        }
+        // Record usage
+        recordUsage(chatId);
 
-        if (response == null || response.isBlank()) {
-            response = "No verse found for that phrase. Try another keyword.";
-        }
+        // Fetch verse from API
+        String response = fetchVerseFromApi(query);
 
-        // 📅 Add usage info to message
-        response += String.format("\n\n📅 You have %d of %d requests left today.", remaining - 1, dailyLimit);
+        // Add usage info
+        int remaining = getRemainingRequests(chatId);
+        response += String.format("\n\n📊 Requests left today: *%d/%d*", remaining, dailyLimit);
 
         sendMessage(chatId, response);
     }
 
     /**
-     * Checks and updates daily usage for the given user.
-     * Returns the number of requests remaining for today.
+     * Fetches verse data from the backend API
+     */
+    private String fetchVerseFromApi(String query) {
+        try {
+            log.debug("Fetching verse for query: {}", query);
+
+            String response = webClient.get()
+                    .uri(uriBuilder -> uriBuilder
+                            .queryParam("query", query)
+                            .build())
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .timeout(Duration.ofSeconds(API_TIMEOUT_SECONDS))
+                    .block();
+
+            if (response == null || response.isBlank()) {
+                return "📖 No verse found for that phrase. Try another keyword like *\"faith\"*, *\"love\"*, or *\"strength\"*.";
+            }
+
+            return response;
+
+        } catch (Exception e) {
+            log.error("Error calling verse API for query '{}': {}", query, e.getMessage());
+            return "❌ Sorry, something went wrong while searching for verses. Please try again later.";
+        }
+    }
+
+    /**
+     * Checks if user can make a request without recording usage
+     */
+    private boolean canMakeRequest(Long chatId) {
+        return getRemainingRequests(chatId) > 0;
+    }
+
+    /**
+     * Gets remaining requests for the user today
      */
     private int getRemainingRequests(Long chatId) {
         LocalDate today = LocalDate.now();
         UserUsage usage = userUsageMap.get(chatId);
 
+        // New user or new day
         if (usage == null || !usage.date.equals(today)) {
-            userUsageMap.put(chatId, new UserUsage(today, 1));
-            log.info("🆕 New user/day {} -> count = 1", chatId);
-            return dailyLimit - 1;
+            return dailyLimit;
         }
 
-        if (usage.count >= dailyLimit) {
-            log.info("🚫 User {} exceeded limit ({} requests)", chatId, usage.count);
-            return 0;
-        }
-
-        usage.count++;
-        int remaining = dailyLimit - usage.count;
-        log.info("📈 User {} -> used: {}, remaining: {}", chatId, usage.count, remaining);
-        return remaining + 1; // Return remaining *before* next request
+        return Math.max(0, dailyLimit - usage.count.get());
     }
 
+    /**
+     * Records a request for the user
+     */
+    private synchronized void recordUsage(Long chatId) {
+        LocalDate today = LocalDate.now();
+        UserUsage usage = userUsageMap.get(chatId);
+
+        if (usage == null || !usage.date.equals(today)) {
+            // New day or new user
+            userUsageMap.put(chatId, new UserUsage(today));
+            log.info("New usage record created for user {}", chatId);
+        } else {
+            usage.count.incrementAndGet();
+        }
+
+        int currentCount = userUsageMap.get(chatId).count.get();
+        int remaining = dailyLimit - currentCount;
+        log.info("User {} - Used: {}, Remaining: {}", chatId, currentCount, remaining);
+    }
+
+    /**
+     * Sends a message to the user
+     */
     private void sendMessage(Long chatId, String text) {
         SendMessage msg = new SendMessage(chatId.toString(), text);
         msg.enableMarkdown(true);
+
         try {
             execute(msg);
+            log.debug("Message sent to user {}", chatId);
         } catch (TelegramApiException e) {
-            log.error("Telegram error: {}", e.getMessage());
+            log.error("Failed to send message to user {}: {}", chatId, e.getMessage());
         }
     }
 
-    private String getWelcomeMessage() {
-        return String.format("""
-                🌿 *Welcome to VerseGuide!*  
-                Discover Bible verses and reflections that bring clarity, peace, or inspiration.  
-                Type a word or phrase like *“hope”*, *“forgiveness”*, or *“peace”*.  
-                VerseGuide will share a matching verse and reflection.  
-                
-                Each user can make up to %d requests per day.  
-                — VerseGuide by Chikere Ezeh 🙏
-                """, dailyLimit);
+    /**
+     * Scheduled task to clean up old usage data (runs daily at 2 AM)
+     */
+    @Scheduled(cron = "0 0 2 * * *")
+    public void cleanupOldUsageData() {
+        LocalDate yesterday = LocalDate.now().minusDays(1);
+        int removedCount = 0;
+
+        var iterator = userUsageMap.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var entry = iterator.next();
+            if (entry.getValue().date.isBefore(yesterday)) {
+                iterator.remove();
+                removedCount++;
+            }
+        }
+
+        if (removedCount > 0) {
+            log.info("Cleaned up {} old usage records", removedCount);
+        }
     }
 
     @Override
@@ -149,13 +301,16 @@ public class VerseGuideBot extends TelegramLongPollingBot {
         return botToken;
     }
 
+    /**
+     * Internal class to track user usage per day
+     */
     private static class UserUsage {
-        LocalDate date;
-        int count;
+        final LocalDate date;
+        final AtomicInteger count;
 
-        UserUsage(LocalDate date, int count) {
+        UserUsage(LocalDate date) {
             this.date = date;
-            this.count = count;
+            this.count = new AtomicInteger(1);
         }
     }
 }
