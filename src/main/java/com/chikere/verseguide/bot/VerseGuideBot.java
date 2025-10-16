@@ -31,29 +31,59 @@ public class VerseGuideBot extends TelegramLongPollingBot {
     @Override
     public void onUpdateReceived(Update update) {
         if (update.hasMessage() && update.getMessage().hasText()) {
-            var chatId = update.getMessage().getChatId().toString();
-            var userMessage = update.getMessage().getText();
+            String chatId = update.getMessage().getChatId().toString();
+            String userText = update.getMessage().getText().trim();
+
+            // Welcome on /start
+            if (userText.equalsIgnoreCase("/start")) {
+                SendMessage welcomeMsg = getWelcomeMsg(chatId);
+                try {
+                    execute(welcomeMsg);
+                } catch (TelegramApiException e) {
+                    log.error("Failed to send welcome message: {}", e.getMessage());
+                }
+                return;
+            }
+
+            // Otherwise treat it as a verse request
             String response;
             try {
                 response = restTemplate.getForObject(
                         "http://localhost:8080/api/verse?query={query}",
                         String.class,
-                        userMessage
+                        userText
                 );
             } catch (Exception e) {
+                log.error("Error calling verse API: {}", e.getMessage());
                 response = "Sorry, I couldn’t find a suitable verse right now. Please try again later.";
             }
+            if (response == null) {
+                response = "No verse found.";
+            }
 
-            assert response != null;
             SendMessage message = new SendMessage(chatId, response);
             message.enableMarkdown(true);
 
             try {
                 execute(message);
             } catch (TelegramApiException e) {
-                log.error("Exception during processing telegram api: {}", e.getMessage());
+                log.error("Exception sending verse response: {}", e.getMessage());
             }
         }
+    }
+
+    private static SendMessage getWelcomeMsg(String chatId) {
+        String welcome = """
+                 🌿 Welcome to VerseGuide! \s
+                 Find Bible verses and reflections that bring clarity, peace, or inspiration at times of need. \s
+                 Just type a word or phrase like *“hope”*, *“forgiveness”*, or *“ seeking peace”*  \s
+                 and VerseGuide will provide a verse and short reflection that match your theme. \s
+                 Start whenever you’re ready.
+                 Thanks Chikere Ezeh 🙏.
+               """;
+        SendMessage welcomeMsg = new SendMessage(chatId, welcome);
+        welcomeMsg.enableMarkdown(true);
+        return welcomeMsg;
     }
 
     @Override
