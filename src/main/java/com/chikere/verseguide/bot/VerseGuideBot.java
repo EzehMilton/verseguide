@@ -33,13 +33,12 @@ public class VerseGuideBot extends TelegramLongPollingBot {
     private final String verseApiUrl;
     private final WebClient webClient;
 
-    // Thread-safe storage for user usage data
     private final Map<Long, UserUsage> userUsageMap = new ConcurrentHashMap<>();
 
     public VerseGuideBot(
             @Value("${telegram.bot.username}") String botUsername,
             @Value("${telegram.bot.token}") String botToken,
-            @Value("${telegram.bot.daily-limit:3}") int dailyLimit,
+            @Value("${telegram.bot.daily-limit:5}") int dailyLimit,
             @Value("${verse.api.url:http://localhost:8080/api/verse}") String verseApiUrl,
             WebClient.Builder webClientBuilder
     ) {
@@ -51,7 +50,7 @@ public class VerseGuideBot extends TelegramLongPollingBot {
                 .baseUrl(verseApiUrl)
                 .build();
 
-        log.info("VerseGuideBot initialized - username: {}, dailyLimit: {}, apiUrl: {}",
+        log.info("VerseGuideBot initialized - Application Name: {}, Daily Limit: {}, Application Url: {}",
                 botUsername, dailyLimit, verseApiUrl);
     }
 
@@ -68,7 +67,7 @@ public class VerseGuideBot extends TelegramLongPollingBot {
             handleUserMessage(chatId, userText);
         } catch (Exception e) {
             log.error("Error processing message from user {}: {}", chatId, e.getMessage(), e);
-            sendMessage(chatId, "❌ An unexpected error occurred. Please try again later.");
+            sendMessage(chatId, "❌ An unexpected error occurred. Please try again later. Thank you!");
         }
     }
 
@@ -91,19 +90,19 @@ public class VerseGuideBot extends TelegramLongPollingBot {
     private void handleStartCommand(Long chatId) {
         String welcomeMessage = String.format("""
                 🌿 *Welcome to VerseGuide!*
-                Discover Bible verses and reflections that bring clarity, peace, or inspiration.
+                Explore Bible verses and reflections that offer clarity, peace, and inspiration for whatever you’re facing today.
                 
                 📖 *How to use:*
-                Type a word or phrase like *"hope"*, *"forgiveness"*, or *"peace"*.
-                VerseGuide will share a matching verse and reflection.
+                Type a word or phrase like *"Hope"*, *"Lord, give me strength"*, or *"God, I need you right now"*.
+                VerseGuide will share a matching Bible verse and reflection 🙏.
                 
                 📊 *Commands:*
                 /help - Show this help message
                 /status - Check your remaining requests
                 
-                ⚖️ *Rate Limit:* %d requests per day
+                ⚖️ *Rate Limit:* %d requests per day. (Free plan)
                 
-                — VerseGuide by Chikere Ezeh 🙏
+                — VerseGuide by Chikere Ezeh
                 """, dailyLimit);
         sendMessage(chatId, welcomeMessage);
     }
@@ -112,7 +111,7 @@ public class VerseGuideBot extends TelegramLongPollingBot {
      * Handles the /help command
      */
     private void handleHelpCommand(Long chatId) {
-        handleStartCommand(chatId); // Same as welcome message
+        handleStartCommand(chatId);
     }
 
     /**
@@ -123,7 +122,7 @@ public class VerseGuideBot extends TelegramLongPollingBot {
         int used = dailyLimit - remaining;
 
         String statusMessage = String.format("""
-                📊 *Your Daily Status*
+                📊 *Your Daily Status (Free plan)*
                 
                 ✅ Used: %d request(s)
                 🔄 Remaining: %d request(s)
@@ -147,9 +146,8 @@ public class VerseGuideBot extends TelegramLongPollingBot {
      * Handles verse search queries
      */
     private void handleVerseQuery(Long chatId, String query) {
-        // Validate input
         if (query.isBlank()) {
-            sendMessage(chatId, "⚠️ Please enter a word or phrase to search for verses.");
+            sendMessage(chatId, "⚠️ Please enter a word or phrase to search for Bible verses.");
             return;
         }
 
@@ -160,27 +158,20 @@ public class VerseGuideBot extends TelegramLongPollingBot {
             return;
         }
 
-        // Check rate limit
         if (!canMakeRequest(chatId)) {
             sendMessage(chatId, String.format("""
                     ⚠️ You've reached your daily limit of %d requests.
-                    Your limit will reset at midnight. 🙏
+                    Your free plan resets at midnight.. 🙏
                     
                     Use /status to check your remaining requests.
                     """, dailyLimit));
             return;
         }
 
-        // Record usage
         recordUsage(chatId);
-
-        // Fetch verse from API
         String response = fetchVerseFromApi(query);
-
-        // Add usage info
         int remaining = getRemainingRequests(chatId);
         response += String.format("\n\n📊 Requests left today: *%d/%d*", remaining, dailyLimit);
-
         sendMessage(chatId, response);
     }
 
@@ -201,14 +192,14 @@ public class VerseGuideBot extends TelegramLongPollingBot {
                     .block();
 
             if (response == null || response.isBlank()) {
-                return "📖 No verse found for that phrase. Try another keyword like *\"faith\"*, *\"love\"*, or *\"strength\"*.";
+                return "📖 No Bible verse found for that phrase. Try another keyword like *\"faith\"*, *\"love\"*, or *\"strength\"*.";
             }
 
             return response;
 
         } catch (Exception e) {
             log.error("Error calling verse API for query '{}': {}", query, e.getMessage());
-            return "❌ Sorry, something went wrong while searching for verses. Please try again later.";
+            return "❌ Sorry, something went wrong while searching for Bible verses. Please try again later.";
         }
     }
 
@@ -226,7 +217,6 @@ public class VerseGuideBot extends TelegramLongPollingBot {
         LocalDate today = LocalDate.now();
         UserUsage usage = userUsageMap.get(chatId);
 
-        // New user or new day
         if (usage == null || !usage.date.equals(today)) {
             return dailyLimit;
         }

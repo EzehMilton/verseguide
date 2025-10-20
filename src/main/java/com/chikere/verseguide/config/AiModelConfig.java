@@ -15,11 +15,6 @@ public class AiModelConfig {
     public ChatClient chatClient(ChatClient.Builder chatClientBuilder) {
         return chatClientBuilder
                 .defaultAdvisors(new MessageChatMemoryAdvisor(new InMemoryChatMemory()), new SimpleLoggerAdvisor())
-//                .defaultOptions(OpenAiChatOptions.builder()
-//                        .model("gpt-4o-mini-2024-07-18")
-//                        .temperature(0.6)
-//                        .maxTokens(500)
-//                        .build())
                 .build();
     }
 
