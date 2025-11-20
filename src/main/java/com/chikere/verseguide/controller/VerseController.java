@@ -19,7 +19,7 @@ public class VerseController {
     private final PromptLoader promptLoader;
 
     @GetMapping("/verse")
-    public String getVerse(@RequestParam String query) {
+    public String getVerse(@RequestParam String query) throws Exception {
         String promptTemplate = promptLoader.loadPrompt("verse_prompt.txt");
         String promptText = String.format(promptTemplate, query);
         Prompt prompt = new Prompt(new UserMessage(promptText));
